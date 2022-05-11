@@ -1,10 +1,13 @@
 package de.bsi.secvisogram.csaf_cms_backend.json;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.util.DefaultPrettyPrinter;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import de.bsi.secvisogram.csaf_cms_backend.model.WorkflowState;
+import de.bsi.secvisogram.csaf_cms_backend.model.filter.*;
 import de.bsi.secvisogram.csaf_cms_backend.rest.response.AdvisoryResponse;
 import java.io.IOException;
 import java.io.InputStream;
@@ -26,7 +29,7 @@ public class AdvisoryJsonService {
 
     public ObjectNode convertCsafToJson(InputStream csafJsonStream, String userName, WorkflowState state) throws IOException {
 
-        JsonNode csafRootNode = jacksonMapper.readValue(csafJsonStream, JsonNode.class);
+        JsonNode csafRootNode = this.jacksonMapper.readValue(csafJsonStream, JsonNode.class);
 
         ObjectNode rootNode = jacksonMapper.createObjectNode();
         rootNode.put(WORKFLOW_STATE_FIELD, state.name());
@@ -50,5 +53,30 @@ public class AdvisoryJsonService {
         response.setCsaf(updateString);
 
         return response;
+    }
+
+    /**
+     * Convert Search Expression to JSON String
+     * @param expression2Convert the expression to convert
+     * @return the converted expression
+     * @throws JsonProcessingException a conversion problem has occurred
+     */
+    public String expression2Json(Expression expression2Convert) throws JsonProcessingException {
+
+        ObjectWriter writer = this.jacksonMapper.writer(new DefaultPrettyPrinter());
+
+        return writer.writeValueAsString(expression2Convert);
+    }
+
+    /**
+     * Convert JSON String to Search expression
+     * @param jsonString the String to convert
+     * @return the converted expression
+     * @throws JsonProcessingException
+     */
+    public Expression json2Expression(String jsonString) throws JsonProcessingException {
+
+        return this.jacksonMapper.readValue(jsonString, Expression.class);
+
     }
 }
