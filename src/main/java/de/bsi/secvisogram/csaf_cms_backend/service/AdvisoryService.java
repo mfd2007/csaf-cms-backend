@@ -2,19 +2,23 @@ package de.bsi.secvisogram.csaf_cms_backend.service;
 
 import static de.bsi.secvisogram.csaf_cms_backend.config.CsafRoles.Role.AUDITOR;
 import static de.bsi.secvisogram.csaf_cms_backend.couchdb.AdvisoryAuditTrailField.ADVISORY_ID;
+import static de.bsi.secvisogram.csaf_cms_backend.couchdb.AdvisorySearchField.DOCUMENT_TRACKING_ID;
 import static de.bsi.secvisogram.csaf_cms_backend.couchdb.CouchDBFilterCreator.expr2CouchDBFilter;
+import static de.bsi.secvisogram.csaf_cms_backend.couchdb.CouchDbField.ID_FIELD;
 import static de.bsi.secvisogram.csaf_cms_backend.couchdb.CouchDbField.TYPE_FIELD;
-import static de.bsi.secvisogram.csaf_cms_backend.exception.CsafExceptionKey.NoPermissionForAdvisory;
-import static de.bsi.secvisogram.csaf_cms_backend.exception.CsafExceptionKey.SummaryInHistoryEmpty;
+import static de.bsi.secvisogram.csaf_cms_backend.exception.CsafExceptionKey.*;
+import static de.bsi.secvisogram.csaf_cms_backend.model.DocumentTrackingStatus.Final;
+import static de.bsi.secvisogram.csaf_cms_backend.model.DocumentTrackingStatus.Interim;
 import static de.bsi.secvisogram.csaf_cms_backend.model.filter.OperatorExpression.containsIgnoreCase;
 import static de.bsi.secvisogram.csaf_cms_backend.model.filter.OperatorExpression.equal;
 import static de.bsi.secvisogram.csaf_cms_backend.service.AdvisoryWorkflowUtil.*;
 import static java.util.Collections.emptyList;
-import static org.springframework.http.HttpStatus.BAD_REQUEST;
-import static org.springframework.http.HttpStatus.UNAUTHORIZED;
+import static org.springframework.http.HttpStatus.*;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.MappingIterator;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ibm.cloud.sdk.core.service.exception.BadRequestException;
 import com.ibm.cloud.sdk.core.service.exception.NotFoundException;
 import de.bsi.secvisogram.csaf_cms_backend.config.CsafConfiguration;
@@ -49,6 +53,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.info.BuildProperties;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.Authentication;
@@ -77,8 +82,20 @@ public class AdvisoryService {
     @Value("${csaf.validation.baseurl}")
     private String validationBaseUrl;
 
+    @Value("${csaf.references.baseurl}")
+    private String referencesBaseUrl;
+
+    @Value("${csaf.trackingid.company}")
+    private String trackingidCompany;
+
+    @Value("${csaf.trackingid.digits}")
+    private String trackingidDigits;
+
     @Autowired
     private CsafConfiguration configuration;
+
+    @Autowired
+    private BuildProperties buildProperties;
 
     /**
      * get number of documents
@@ -108,9 +125,9 @@ public class AdvisoryService {
         }
         List<AdvisoryInformationResponse> allResponses
                 = new ArrayList<>(allAdvisories
-                    .stream()
-                    .filter(response -> canViewAdvisory(response, credentials))
-                    .toList());
+                .stream()
+                .filter(response -> canViewAdvisory(response, credentials))
+                .toList());
 
         if (hasRole(AUDITOR, credentials)) {
             List<AdvisoryInformationResponse> allAdvisoryVersions = readAllAdvisories(expression, ObjectType.AdvisoryVersion);
@@ -161,7 +178,7 @@ public class AdvisoryService {
      * @return a tuple of assigned id as UUID and the current revision for concurrent control
      * @throws JsonProcessingException if the given JSON string is not valid
      */
-    @RolesAllowed({ CsafRoles.ROLE_AUTHOR})
+    @RolesAllowed({CsafRoles.ROLE_AUTHOR})
     public IdAndRevision addAdvisory(CreateAdvisoryRequest newCsafJson) throws IOException, CsafException {
 
         LOG.debug("addAdvisory");
@@ -169,6 +186,7 @@ public class AdvisoryService {
 
         return addAdvisoryForCredentials(newCsafJson, credentials);
     }
+
 
     IdAndRevision addAdvisoryForCredentials(CreateAdvisoryRequest newCsafJson, Authentication credentials) throws IOException, CsafException {
 
@@ -180,6 +198,8 @@ public class AdvisoryService {
         AdvisoryWrapper emptyAdvisory = AdvisoryWrapper.createInitialEmptyAdvisoryForUser(credentials.getName());
         AdvisoryWrapper newAdvisoryNode = AdvisoryWrapper.createNewFromCsaf(newCsafJson, credentials.getName(),
                 this.versioningStrategy);
+        newAdvisoryNode.setDocumentTrackingGeneratorEngineName(buildProperties.getName());
+        newAdvisoryNode.setDocumentTrackingGeneratorEngineVersion(buildProperties.getVersion());
         AuditTrailWrapper auditTrail = AdvisoryAuditTrailDiffWrapper.createNewFromAdvisories(emptyAdvisory, newAdvisoryNode)
                 .setAdvisoryId(advisoryId.toString())
                 .setChangeType(ChangeType.Create)
@@ -192,10 +212,127 @@ public class AdvisoryService {
             newAdvisoryNode.setDocumentTrackingCurrentReleaseDate(timestampNow);
         }
 
+        addTemporaryTrackingId(newAdvisoryNode);
+
         String revision = couchDbService.writeDocument(advisoryId, newAdvisoryNode.advisoryAsString());
         this.couchDbService.writeDocument(UUID.randomUUID(), auditTrail.auditTrailAsString());
 
         return new IdAndRevision(advisoryId.toString(), revision);
+    }
+
+    /**
+     * Import an advisory to the system for an authenticated user
+     *
+     * @param newCsafJson the advisory as JSON
+     * @return a tuple of assigned id as UUID and the current revision for concurrent control
+     * @throws JsonProcessingException if the given JSON string is not valid
+     */
+    @RolesAllowed({CsafRoles.ROLE_PUBLISHER})
+    public IdAndRevision importAdvisory(JsonNode newCsafJson) throws IOException, CsafException {
+
+        LOG.debug("importAdvisory");
+        Authentication credentials = getAuthentication();
+
+        return importAdvisoryForCredentials(newCsafJson, credentials);
+    }
+
+    IdAndRevision importAdvisoryForCredentials(JsonNode nodeToImport, Authentication credentials) throws IOException, CsafException {
+        return importAdvisoryForUser(nodeToImport, credentials.getName());
+    }
+
+    /**
+     * Import an advisory to the system for a system user
+     * Should only be used for imports on application startup
+     *
+     * @param nodeToImport the advisory as JSON
+     * @return a tuple of ID and revision of the imported advisory
+     * @throws IOException   when there are errors reading a file
+     * @throws CsafException when there are errors processing the advisory
+     *                       this could be invalid CSAF documents, importing a duplicate or importing an advisory which
+     *                       is not in interim or final status
+     */
+    public IdAndRevision importAdvisoryForSystem(JsonNode nodeToImport) throws IOException, CsafException {
+        return importAdvisoryForUser(nodeToImport, "_SYSTEM_IMPORT_");
+    }
+
+    IdAndRevision importAdvisoryForUser(JsonNode nodeToImport, String userName) throws IOException, CsafException {
+
+        UUID advisoryId = UUID.randomUUID();
+        if (!ValidatorServiceClient.isCsafValid(this.validationBaseUrl, nodeToImport)) {
+            throw new CsafException("Advisory is no valid CSAF document",
+                    CsafExceptionKey.AdvisoryValidationError, HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+        AdvisoryWrapper emptyAdvisory = AdvisoryWrapper.createInitialEmptyAdvisoryForUser(userName);
+        AdvisoryWrapper newAdvisoryNode = AdvisoryWrapper.importNewFromCsaf(nodeToImport, userName);
+
+        String documentTrackingStatus = newAdvisoryNode.getDocumentTrackingStatus();
+        if (!documentTrackingStatus.equals(Interim.getCsafValue()) &&
+            !documentTrackingStatus.equals(Final.getCsafValue())) {
+            throw new CsafException("Advisory is not in state final or interim",
+                    CsafExceptionKey.AdvisoryValidationError, HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+
+        Map<String, Object> selector = expr2CouchDBFilter(equal(newAdvisoryNode.getDocumentTrackingId(), DOCUMENT_TRACKING_ID.getDbName()));
+        List<JsonNode> docList = findDocuments(selector, List.of(ID_FIELD));
+        if (!docList.isEmpty()) {
+            throw new CsafException("Trying to import a duplicate advisory (identical tracking ID)", DuplicateImport, UNPROCESSABLE_ENTITY);
+        }
+
+        AuditTrailWrapper auditTrail = AdvisoryAuditTrailDiffWrapper.createNewFromAdvisories(emptyAdvisory, newAdvisoryNode)
+                .setAdvisoryId(advisoryId.toString())
+                .setChangeType(ChangeType.Create)
+                .setUser(userName);
+
+
+        String revision = couchDbService.writeDocument(advisoryId, newAdvisoryNode.advisoryAsString());
+        this.couchDbService.writeDocument(UUID.randomUUID(), auditTrail.auditTrailAsString());
+
+        return new IdAndRevision(advisoryId.toString(), revision);
+    }
+
+    /**
+     * Insert a temporary tracking id in the advisory
+     *
+     * @param newAdvisoryNode node to set the id
+     * @throws CsafException error creating counter
+     */
+    void addTemporaryTrackingId(AdvisoryWrapper newAdvisoryNode) throws CsafException {
+
+        long sequentialNumber = getNewTrackingIdCounter(TrackingIdCounter.TMP_OBJECT_ID);
+        newAdvisoryNode.setTemporaryTrackingId(this.trackingidCompany, this.trackingidDigits, sequentialNumber);
+    }
+
+    /**
+     * Get the next unique tracking id from the db for the given counterId
+     *
+     * @param counterId id of the counter
+     * @return next id
+     * @throws CsafException error creating counter
+     */
+    long getNewTrackingIdCounter(String counterId) throws CsafException {
+
+        Map<String, Object> selector = expr2CouchDBFilter(equal(counterId, ID_FIELD.getDbName()));
+        try {
+            List<JsonNode> docList = findDocuments(selector, List.of(ID_FIELD));
+            if (docList.isEmpty()) {
+                final TrackingIdCounter counter = TrackingIdCounter.createInitialCounter(counterId);
+                final String result = new ObjectMapper().writeValueAsString(counter);
+                this.couchDbService.writeDocument(counterId, result);
+            }
+        } catch (IOException e) {
+            throw new CsafException("Error create new counter for tracking Id", ErrorCreatingTrackingIdCounter, INTERNAL_SERVER_ERROR);
+        }
+
+        try (InputStream counterStream = couchDbService.readDocumentAsStream(counterId)) {
+            MappingIterator<TrackingIdCounter> counterIter = new ObjectMapper().readerFor(TrackingIdCounter.class).readValues(counterStream);
+            TrackingIdCounter counter = counterIter.next();
+            counter.increaseCount();
+            final String result = new ObjectMapper().writeValueAsString(counter);
+            this.couchDbService.updateDocument(result);
+            return counter.getCount();
+        } catch (IOException | DatabaseException ex) {
+            throw new CsafException("Error create new counter for tracking Id", ErrorCreatingTrackingIdCounter, INTERNAL_SERVER_ERROR);
+        }
     }
 
     /**
@@ -244,7 +381,7 @@ public class AdvisoryService {
      * @throws BadRequestException if the request was
      * @throws NotFoundException   if there is no advisory with given ID
      */
-    @RolesAllowed({ CsafRoles.ROLE_AUTHOR})
+    @RolesAllowed({CsafRoles.ROLE_AUTHOR})
     public void deleteAdvisory(String advisoryId, String revision) throws DatabaseException, IOException, CsafException {
 
         LOG.debug("deleteAdvisory");
@@ -322,6 +459,8 @@ public class AdvisoryService {
 
                 AdvisoryWrapper newAdvisoryNode = AdvisoryWrapper.updateFromExisting(oldAdvisoryNode, changedCsafJson);
                 newAdvisoryNode.setRevision(revision);
+                newAdvisoryNode.setDocumentTrackingGeneratorEngineName(buildProperties.getName());
+                newAdvisoryNode.setDocumentTrackingGeneratorEngineVersion(buildProperties.getVersion());
                 PatchType changeType = AdvisoryWorkflowUtil.getChangeType(oldAdvisoryNode, newAdvisoryNode, configuration.getVersioning().getLevenshtein());
                 String nextVersion = oldAdvisoryNode.getVersioningStrategy().getNextVersion(changeType, oldAdvisoryNode.getDocumentTrackingVersion(), oldAdvisoryNode.getLastVersion());
                 newAdvisoryNode.setDocumentTrackingVersion(nextVersion);
@@ -358,7 +497,7 @@ public class AdvisoryService {
      * @param advisoryId the id of the advisory that should be exported
      * @param format     the format in which the export should be written (default JSON on null)
      * @return the path to the temporary file that contains the export
-     * @throws CsafException    if the advisory with the given id does not exist or the export format is unknown
+     * @throws CsafException        if the advisory with the given id does not exist or the export format is unknown
      * @throws IOException          on any error regarding writing/reading from disk
      * @throws InterruptedException if the export did take too long and thus timed out
      */
@@ -479,6 +618,7 @@ public class AdvisoryService {
 
             if (newWorkflowState == WorkflowState.Published) {
                 existingAdvisoryNode = createReleaseReadyAdvisoryAndValidate(existingAdvisoryNode, proposedTime);
+                setFinalTrackingIdAndUrl(existingAdvisoryNode);
             }
 
             AuditTrailWrapper auditTrail = AdvisoryAuditTrailWorkflowWrapper.createNewFrom(newWorkflowState, previousWorkflowState)
@@ -495,6 +635,19 @@ public class AdvisoryService {
                     NoPermissionForAdvisory, UNAUTHORIZED);
         }
     }
+
+    /**
+     * Set the final tracking id in the advisory and a DocumentReferencesNode with the url of the tracking id
+     *
+     * @param advisoryNode the node to set the tracking id
+     * @throws CsafException error creating counter
+     */
+    void setFinalTrackingIdAndUrl(AdvisoryWrapper advisoryNode) throws CsafException {
+
+        final long sequentialNumber = getNewTrackingIdCounter(TrackingIdCounter.FINAL_OBJECT_ID);
+        advisoryNode.setFinalTrackingIdAndUrl(this.referencesBaseUrl, this.trackingidCompany, this.trackingidDigits, sequentialNumber);
+    }
+
 
     private AdvisoryWrapper createReleaseReadyAdvisoryAndValidate(AdvisoryWrapper advisory, String releaseDate) throws CsafException, IOException {
 
@@ -533,7 +686,7 @@ public class AdvisoryService {
             advisoryCopy.setDocumentTrackingInitialReleaseDate(releaseDate);
         }
 
-        if (! ValidatorServiceClient.isAdvisoryValid(this.validationBaseUrl, advisoryCopy)) {
+        if (!ValidatorServiceClient.isAdvisoryValid(this.validationBaseUrl, advisoryCopy)) {
             throw new CsafException("Advisory is no valid CSAF document",
                     CsafExceptionKey.AdvisoryValidationError, HttpStatus.UNPROCESSABLE_ENTITY);
         }
@@ -583,7 +736,7 @@ public class AdvisoryService {
             this.couchDbService.writeDocument(UUID.randomUUID(), auditTrail.auditTrailAsString());
             this.deleteAllCommentsFromDbForAdvisory(existingAdvisoryNode.getAdvisoryId());
 
-            String newRevision =  this.couchDbService.updateDocument(existingAdvisoryNode.advisoryAsString());
+            String newRevision = this.couchDbService.updateDocument(existingAdvisoryNode.advisoryAsString());
 
             this.couchDbService.writeDocument(UUID.randomUUID(), advisoryVersionBackup.advisoryAsString());
 

@@ -4,6 +4,8 @@ import static de.bsi.secvisogram.csaf_cms_backend.couchdb.AdvisoryField.CSAF;
 import static de.bsi.secvisogram.csaf_cms_backend.couchdb.CouchDbField.ID_FIELD;
 import static de.bsi.secvisogram.csaf_cms_backend.couchdb.CouchDbField.REVISION_FIELD;
 import static de.bsi.secvisogram.csaf_cms_backend.exception.CsafExceptionKey.InvalidObjectType;
+import static java.time.LocalDateTime.from;
+import static java.time.format.DateTimeFormatter.ISO_DATE_TIME;
 import static org.springframework.http.HttpStatus.BAD_REQUEST;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -28,14 +30,20 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.BiConsumer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 
 /**
  * Wrapper around JsonNode to read and write advisory objects from/to the CouchDB
  */
 public class AdvisoryWrapper {
+
+    private static final Logger LOG = LoggerFactory.getLogger(AdvisoryWrapper.class);
 
     public static final String emptyCsafDocument = """
             { "document": {
@@ -107,6 +115,19 @@ public class AdvisoryWrapper {
         return rootNode;
     }
 
+    private static ObjectNode createAdvisoryNodeFromRequest(JsonNode csafJson) throws CsafException {
+
+        final ObjectMapper jacksonMapper = new ObjectMapper();
+        if (csafJson == null || !csafJson.has("document")) {
+            throw new CsafException("Csaf contains no document entry", CsafExceptionKey.CsafHasNoDocumentNode,
+                    HttpStatus.BAD_REQUEST);
+        }
+
+        ObjectNode rootNode = jacksonMapper.createObjectNode();
+        rootNode.set(CSAF.getDbName(), csafJson);
+        return rootNode;
+    }
+
 
     private static ObjectNode createAdvisoryNodeFromString(String csafJson) throws IOException {
 
@@ -161,6 +182,30 @@ public class AdvisoryWrapper {
                 .setType(ObjectType.Advisory)
                 .setDocumentTrackingVersion(versioning.getInitialVersion())
                 .setDocumentTrackingStatus(DocumentTrackingStatus.Draft);
+
+        return wrapper;
+    }
+
+    /**
+     * Convert an CSAF document to an initial AdvisoryWrapper for a given user.
+     * The wrapper has no id and revision.
+     *
+     * @param newCsafJson        the csaf string
+     * @param userName           the user
+     * @return the wrapper
+     * @throws CsafException exception in handling json string
+     */
+    public static AdvisoryWrapper importNewFromCsaf(JsonNode newCsafJson, String userName) throws CsafException {
+
+        AdvisoryWrapper wrapper = new AdvisoryWrapper(createAdvisoryNodeFromRequest(newCsafJson));
+        String documentTrackingVersion = wrapper.getDocumentTrackingVersion();
+        Versioning versioning = Versioning.detectStrategy(documentTrackingVersion);
+        wrapper.setCreatedAtToNow()
+                .setWorkflowState(WorkflowState.Published)
+                .setOwner(userName)
+                .setLastVersion(documentTrackingVersion)
+                .setVersioningType(versioning.getVersioningType())
+                .setType(ObjectType.Advisory);
 
         return wrapper;
     }
@@ -237,13 +282,36 @@ public class AdvisoryWrapper {
     }
 
     /**
-     * set reference form AdvisoryVersion to source advisory
+     * set reference form AdvisoryVersion to source advisory in the advisory metadata
+     *
      * @param advisoryId the id of the referenced advisory
      * @return this
      */
     private AdvisoryWrapper setAdvisoryReference(String advisoryId) {
 
         this.advisoryNode.put(AdvisoryField.ADVISORY_REFERENCE.getDbName(), advisoryId);
+        return this;
+    }
+
+    /**
+     * get the temporary tracking id from the metadata
+     *
+      * @return this
+     */
+    public String getTempTrackingIdInFromMeta() {
+
+        return this.getTextFor(AdvisoryField.TMP_TRACKING_ID);
+    }
+
+    /**
+     * set the temporary tracking id in the metadata
+     *
+     * @param tempTrackingId the temporary tracking id
+     * @return this
+     */
+    private AdvisoryWrapper setTempTrackingIdInMeta(String tempTrackingId) {
+
+        this.advisoryNode.put(AdvisoryField.TMP_TRACKING_ID.getDbName(), tempTrackingId);
         return this;
     }
 
@@ -399,7 +467,20 @@ public class AdvisoryWrapper {
 
     public String getDocumentTrackingStatus() {
 
-        JsonNode versionNode = this.at(AdvisorySearchField.DOCUMENT_TRACKING_STATUS);
+        JsonNode statusNode = this.at(AdvisorySearchField.DOCUMENT_TRACKING_STATUS);
+        return (statusNode.isMissingNode()) ? "" : statusNode.asText();
+    }
+
+    public String getDocumentTrackingGeneratorEngineName() {
+
+        JsonNode nameNode = this.at(AdvisorySearchField.DOCUMENT_TRACKING_GENERATOR_ENGINE_NAME);
+        return (nameNode.isMissingNode()) ? "" : nameNode.asText();
+    }
+
+
+    public String getDocumentTrackingGeneratorEngineVersion() {
+
+        JsonNode versionNode = this.at(AdvisorySearchField.DOCUMENT_TRACKING_GENERATOR_ENGINE_VERSION);
         return (versionNode.isMissingNode()) ? "" : versionNode.asText();
     }
 
@@ -415,9 +496,24 @@ public class AdvisoryWrapper {
         return (versionNode.isMissingNode()) ? null : versionNode.asText();
     }
 
+    public String getDocumentPublisherName() {
+
+        JsonNode publisherNameNode = this.at("/csaf/document/publisher/name");
+        return (publisherNameNode.isMissingNode()) ? null : publisherNameNode.asText();
+    }
 
     /**
-     * Set tracking field in the document tracking node.
+     *  Get the tlp label for the tracking id. Use WHITE as default
+     * @return the tlp label
+     */
+    public String getDocumentDistributionTlp() {
+
+        JsonNode tlpNode = this.at("/csaf/document/distribution/tlp");
+        return (tlpNode.isMissingNode()) ? null : tlpNode.asText();
+    }
+
+    /**
+     * Set version field in the document tracking node.
      * Create nodes when they not exist.
      *
      * @param newVersion the new version
@@ -427,6 +523,20 @@ public class AdvisoryWrapper {
 
         ObjectNode trackingNode = getOrCreateTrackingNode();
         trackingNode.put("version", newVersion);
+        return this;
+    }
+
+    /**
+     * Set id field in the document tracking node.
+     * Create nodes when they not exist.
+     *
+     * @param newId the new version
+     * @return this
+     */
+    public AdvisoryWrapper setDocumentTrackingId(String newId) {
+
+        ObjectNode trackingNode = getOrCreateTrackingNode();
+        trackingNode.put("id", newId);
         return this;
     }
 
@@ -447,6 +557,47 @@ public class AdvisoryWrapper {
         ObjectNode trackingNode = getOrCreateTrackingNode();
         trackingNode.put("status", newState);
         return this;
+    }
+
+    /**
+     * Set name of the generator engine node.
+     * Create nodes when they not exist.
+     *
+     * @return this
+     */
+    public AdvisoryWrapper setDocumentTrackingGeneratorEngineName(String engineName) {
+        ObjectNode engineNode = getOrCreateObjectNode(
+                getOrCreateTrackingNode(), List.of("generator", "engine")
+        );
+        engineNode.put("name", engineName);
+        return this;
+    }
+
+    /**
+     * Set version of the generator engine node.
+     * Create nodes when they not exist.
+     *
+     * @return this
+     */
+    public AdvisoryWrapper setDocumentTrackingGeneratorEngineVersion(String engineVersion) {
+        ObjectNode engineNode = getOrCreateObjectNode(
+                getOrCreateTrackingNode(), List.of("generator", "engine")
+        );
+        engineNode.put("version", engineVersion);
+        return this;
+    }
+
+    private ObjectNode getOrCreateObjectNode(ObjectNode node, List<String> ptr) {
+        if (ptr.isEmpty()) {
+            return node;
+        }
+        final ObjectMapper jacksonMapper = new ObjectMapper();
+        ObjectNode nextNode = (ObjectNode) node.get(ptr.get(0));
+        if (nextNode == null) {
+            nextNode = jacksonMapper.createObjectNode();
+            node.set(ptr.get(0), nextNode);
+        }
+        return getOrCreateObjectNode(nextNode, ptr.subList(1, ptr.size()));
     }
 
     public AdvisoryWrapper addRevisionHistoryElement(CreateAdvisoryRequest changedCsafJson, String timestamp) {
@@ -531,7 +682,7 @@ public class AdvisoryWrapper {
         } else {
             historyNode.forEach(historyItem -> {
                 String historyItemVersion = historyItem.get("number").asText();
-                if (! ("0".equals(historyItemVersion))) {
+                if (!("0".equals(historyItemVersion))) {
                     newHistoryNode.add(historyItem);
                 }
             });
@@ -574,20 +725,13 @@ public class AdvisoryWrapper {
     }
 
     private ObjectNode getOrCreateTrackingNode() {
-
-        final ObjectMapper jacksonMapper = new ObjectMapper();
-        ObjectNode versionNode = (ObjectNode) this.at(AdvisorySearchField.DOCUMENT);
-        ObjectNode trackingNode = (ObjectNode) versionNode.get("tracking");
-        if (trackingNode == null) {
-            trackingNode = jacksonMapper.createObjectNode();
-            versionNode.set("tracking", trackingNode);
-        }
-        return trackingNode;
+        return getOrCreateObjectNode(this.advisoryNode, List.of("csaf", "document", "tracking"));
     }
 
     /**
      * Set current_release_date in document tracking node.
      * Create nodes when they not exist.
+     *
      * @param newDate the new date as ISO-8601 string
      * @return this
      */
@@ -638,6 +782,7 @@ public class AdvisoryWrapper {
     /**
      * This utility method checks if the current_release_date of the advisory is set and if it lies in the past
      * This is helpful for checking if the current_release_date must be updated or not
+     *
      * @param comparedTo the timestamp to compare the current_release_date to
      * @return true if the current release date is not set, or it is in the past
      */
@@ -679,7 +824,6 @@ public class AdvisoryWrapper {
      */
     public static JsonNode calculateJsonDiff(JsonNode source, JsonNode target) {
 
-
         return JsonDiff.asJson(source, target);
     }
 
@@ -698,14 +842,138 @@ public class AdvisoryWrapper {
     /**
      * compares two timestamps if the first is chronologically before the second
      * will be false if the timestamps are exactly the same
+     *
      * @param timestamp1 the first timestamp
      * @param timestamp2 the second timestamp
      * @return true if timestamp1 is chronologically before timestamp2, false otherwise
      */
     private static boolean timestampIsBefore(String timestamp1, String timestamp2) {
-        LocalDateTime t1 = LocalDateTime.from(DateTimeFormatter.ISO_DATE_TIME.parse(timestamp1));
-        LocalDateTime t2 = LocalDateTime.from(DateTimeFormatter.ISO_DATE_TIME.parse(timestamp2));
-        return t1.compareTo(t2) < 0;
+        LocalDateTime t1 = from(ISO_DATE_TIME.parse(timestamp1));
+        LocalDateTime t2 = from(ISO_DATE_TIME.parse(timestamp2));
+        return t1.isBefore(t2);
     }
 
+    /**
+     * add new node to the document references with category 'sef'
+     * @param summary summary of the node
+     * @param url url of the node
+     * @return this wrapper
+     */
+    public AdvisoryWrapper addDocumentReferencesNode(String summary, String url) {
+
+        ObjectNode documentNode = getOrCreateObjectNode(this.advisoryNode, List.of("csaf", "document"));
+        ArrayNode referencesNode = (ArrayNode) documentNode.get("references");
+        if (referencesNode == null) {
+            final ObjectMapper jacksonMapper = new ObjectMapper();
+            referencesNode = jacksonMapper.createArrayNode();
+            documentNode.set("references", referencesNode);
+        }
+
+        ObjectNode entry = referencesNode.addObject();
+        entry.put("category", "self");
+
+        entry.put("summary", summary);
+        entry.put("url", url);
+        return this;
+    }
+
+    public void setTemporaryTrackingId(String trackingidCompany, String trackingidDigits, long sequentialNumber) {
+
+        String companyName = calculateCompanyName(trackingidCompany);
+        String formatted = formatNumber(trackingidDigits, sequentialNumber);
+        setDocumentTrackingId(companyName + "-TEMP-" + formatted);
+    }
+
+    /**
+     * Set the final tracking id in the advisory and a DocumentReferencesNode with the url of the tracking id
+     * @param baseUrl the configured base url
+     * @param trackingIdCompany the configured company for the name of the tracking id
+     * @param trackingIdDigits the count of leading zeros to which the sequentialNumber is filled with
+     * @param sequentialNumber the next sequentialNumber
+     */
+    public void setFinalTrackingIdAndUrl(String baseUrl, String trackingIdCompany, String trackingIdDigits, long sequentialNumber) {
+
+        setTempTrackingIdInMeta(getDocumentTrackingId());
+
+        String companyName = calculateCompanyName(trackingIdCompany);
+        String formatted = formatNumber(trackingIdDigits, sequentialNumber);
+        int year = calculatePublishYear();
+        String trackingId = companyName + "-" + year + "-" + formatted;
+        setDocumentTrackingId(trackingId);
+
+        if (baseUrl != null && !baseUrl.isBlank()) {
+            String referenceUrl = calculateReferenceUrl(baseUrl, trackingId);
+            this.addDocumentReferencesNode("URL generated by system", referenceUrl);
+        }
+    }
+
+    /**
+     * Generate the url for the given baseUrl and tracking id.
+     * Format: BaseURL/TLPLabel/YearOfPublication/trackingId.json
+     * @param baseUrl configured base url
+     * @param trackingId the trackingid
+     * @return the calculated url
+     */
+    String calculateReferenceUrl(String baseUrl, String trackingId) {
+
+        int year = calculatePublishYear();
+        String fileName = calculateFileName(trackingId);
+        String tlpLabel = getDocumentDistributionTlp() != null ? getDocumentDistributionTlp() : "WHITE";
+        return baseUrl + "/" + tlpLabel + "/" + year + "/" + fileName;
+    }
+
+    /**
+     * If trackingidCompany is  not set then we generate the abbreviation from the Publisher Name.
+     * Always the first letters of the words separated by spaces
+     * @param trackingidCompany configured company short name
+     * @return the calculated name
+     */
+    String calculateCompanyName(String trackingidCompany) {
+        String companyName = trackingidCompany;
+        if (trackingidCompany == null || trackingidCompany.isBlank()) {
+            String publisherName = this.getDocumentPublisherName();
+            publisherName = (publisherName != null) ? publisherName.trim() : "";
+            companyName = (publisherName.indexOf(' ') >= 0) ? publisherName.substring(0, publisherName.indexOf(' ')) : publisherName;
+        }
+        return companyName;
+    }
+
+    /**
+     * Calculate the year of publishing based on the initialReleaseDate
+     * @return the calculated year
+     */
+    int calculatePublishYear() {
+
+        String date = this.getDocumentTrackingInitialReleaseDate();
+        return (date != null) ? from(ISO_DATE_TIME.parse(date)).getYear() : LocalDateTime.now().getYear();
+    }
+
+    /**
+     * add leading Zeros
+     * @param trackingidDigits number of digits
+     * @param sequentialNumber generated sequenital number
+     * @return number with leading zeros
+     */
+    static String formatNumber(String trackingidDigits, long sequentialNumber) {
+        int digits;
+        try {
+            digits = Integer.parseInt(trackingidDigits);
+        } catch (NumberFormatException ex) {
+            LOG.warn("csaf.trackingid.digits is not an integer {}", ex.getMessage());
+            digits = 5;
+        }
+        return String.format("%0" + digits + "d", sequentialNumber);
+    }
+
+    /**
+     * Generate CSAF filename from trackingId
+     * according to  <a href="https://docs.oasis-open.org/csaf/csaf/v2.0/os/csaf-v2.0-os.html#51-filename">CSAF 5.1</a>
+     * @param trackingId the value from /document/tracking/id
+     * @return the filename
+     */
+    static String calculateFileName(String trackingId) {
+
+        String documentName = trackingId.toLowerCase(Locale.ENGLISH).replaceAll("[^+\\-a-z0-9]+", "_");
+        return documentName + ".json";
+    }
 }
