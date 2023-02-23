@@ -45,7 +45,7 @@ dependencies {
 	implementation 'org.graalvm.js:js-scriptengine:22.2.0'
 
 	//https://github.com/flipkart-incubator/zjsonpatch
-	implementation ('com.flipkart.zjsonpatch:zjsonpatch:0.4.13') {
+	implementation ('com.flipkart.zjsonpatch:zjsonpatch:0.4.14') {
 		exclude group: 'com.fasterxml.jackson.core', module: 'jackson-databind'
 	}
 
