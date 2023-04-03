@@ -54,7 +54,7 @@ dependencies {
 	testImplementation ('org.openapitools:openapi-generator:6.2.0') {
 		exclude group: 'io.swagger.core.v3', module: 'swagger-models' // conflict with swagger-annotations
 	}
-	testImplementation ('org.openapitools:openapi-generator-cli:6.2.0') {
+	testImplementation ('org.openapitools:openapi-generator-cli:6.5.0') {
 		exclude group: 'io.swagger.core.v3', module: 'swagger-models' // conflict with swagger-annotations
 	}
 
