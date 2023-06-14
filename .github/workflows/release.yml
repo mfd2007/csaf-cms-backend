@@ -59,7 +59,7 @@ jobs:
     - name: Update version in build.gradle
       run: sed -i "s/version '${{ steps.get_version.outputs.version }}'/version '${{ steps.increment_version.outputs.version }}'/" build.gradle
 
-       - name: Build project
+    - name: Build project
       run: ./gradlew clean build bootJar
 
     - name: Create release
