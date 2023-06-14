@@ -79,8 +79,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./build/libs/csaf-cms-backend.jar
-        asset_name: your-artifact.jar
+        asset_path: ./build/libs/csaf-cms-backend-${{ steps.increment_version.outputs.version }}.jar
+        asset_name: csaf-cms-backend-${{ steps.increment_version.outputs.version }}.jar
         asset_content_type: application/java-archive
 
     - name: Add Git tag
