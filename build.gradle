@@ -27,7 +27,7 @@ springBoot {
 }
 
 bootJar {
-   archiveFileName = "csaf-cms-backend.jar"
+   archiveFileName = "csaf-cms.jar"
 }
 
 dependencies {
