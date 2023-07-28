@@ -9,7 +9,7 @@ plugins {
 }
 
 group = 'de.bsi.secvisogram'
-version = '1.0.0'
+version = '1.0.1'
 
 repositories {
 	mavenCentral()
@@ -24,6 +24,10 @@ java {
 
 springBoot {
 	buildInfo()
+}
+
+bootJar {
+   archiveFileName = "csaf-cms-backend.jar"
 }
 
 dependencies {
