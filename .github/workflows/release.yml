@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  pull_request:
+    branches:    
+      - 'releases/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    - name: Setup Java
+      uses: actions/setup-java@v3
+      with:
+        java-version: '17'
+        distribution: 'adopt'
+    - name: Setup Gradle
+      uses: gradle/gradle-build-action@v2.4.2
+      with:
+          gradle-version: 7.4.2
+    - name: Change wrapper permissions
+      run: chmod +x ./gradlew
+
+    - name: Get current version
+      id: get_version
+      run: echo "::set-output name=version::$(./gradlew properties -q | grep '^version:' | awk '{print $2}')"
+
+    - name: Determine increment level
+      id: determine_increment_level
+      run: |
+        if [[ ${{ github.event_name }} == 'pull_request' ]]; then
+          PR_TITLE=$(echo "${{ github.event.pull_request.title }}" | awk '{print tolower($0)}')
+          if [[ $PR_TITLE == *'[minor]'* ]]; then
+            echo "::set-output name=increment_level::minor"
+          elif [[ $PR_TITLE == *'[patch]'* ]]; then
+            echo "::set-output name=increment_level::patch"
+          else
+            echo "::set-output name=increment_level::none"
+          fi
+        else
+          echo "::set-output name=increment_level::none"
+        fi
+
+    - name: Increment version
+      id: increment_version
+      run: |
+        if [[ "${{ steps.determine_increment_level.outputs.increment_level }}" == "minor" ]]; then
+          echo "::set-output name=version::$(echo ${{ steps.get_version.outputs.version }} | awk -F '.' '{print $1 "." $2+1 ".0"}')"
+        elif [[ "${{ steps.determine_increment_level.outputs.increment_level }}" == "patch" ]]; then
+          echo "::set-output name=version::$(echo ${{ steps.get_version.outputs.version }} | awk -F '.' '{print $1 "." $2 "." $3+1}')"
+        else
+          echo "::set-output name=version::${{ steps.get_version.outputs.version }}"
+        fi
+
+    - name: Update version in build.gradle
+      run: sed -i "s/version '${{ steps.get_version.outputs.version }}'/version '${{ steps.increment_version.outputs.version }}'/" build.gradle
+
+    - name: Build project
+      run: ./gradlew clean build bootJar
+
+    - name: Create release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ steps.increment_version.outputs.version }}
+        draft: false
+        prerelease: false
+
+    - name: Upload artifact
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./build/libs/csaf-cms-backend-${{ steps.increment_version.outputs.version }}.jar
+        asset_name: csaf-cms-backend-${{ steps.increment_version.outputs.version }}.jar
+        asset_content_type: application/java-archive
+
+    - name: Add Git tag
+      run: git tag ${{ steps.increment_version.outputs.version }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Push Git tag
+      run: git push origin ${{ steps.increment_version.outputs.version }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
